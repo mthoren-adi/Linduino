@@ -108,6 +108,7 @@ uint8_t menu_5_power_down_dac(int16_t selected_dac);
 uint8_t menu_6_read_adc();
 uint8_t menu_7_sweep();
 uint8_t menu_8_calibrate_all();
+uint8_t menu_9_exercise_comms();
 
 //! Used to keep track to print voltage or print code
 enum prompt
@@ -217,6 +218,11 @@ void loop()
           spi_error_code |= i2c_ack;
           break;
 
+        case 9:
+          i2c_ack |= menu_9_exercise_comms();
+          spi_error_code |= i2c_ack;
+          break;
+
         default:
           Serial.println("Incorrect Option");
           break;
@@ -308,6 +314,7 @@ void print_prompt(int16_t selected_dac) //!< this parameter is passed so that it
   Serial.println(F("  6-Read ADC"));
   Serial.println(F("  7-Sweep"));
   Serial.println(F("  8-Calibrate ALL"));
+  Serial.println(F("  9-Exercise communications (SPI, I2C, UART)"));
   Serial.println();
   Serial.print(F("  Selected DAC: "));
   if (selected_dac != 2)
@@ -629,3 +636,83 @@ uint8_t menu_8_calibrate_all()
   Serial.println(LTC2607_offset[2]);
   return(ack);
 }
+
+
+
+
+
+//! Menu 7: Voltage Sweep
+//! @return Returns the state of the acknowledge bit after the I2C address write. 0=acknowledge, 1=no acknowledge.
+uint8_t menu_9_exercise_comms()
+{
+  uint8_t ack = 0;
+  Serial.print(F("Enter the desired number of sample points: "));
+
+  //! Reads number of sample points from user.
+  uint16_t sample;
+  uint8_t count;
+  
+#define dac_low 16384
+#define dac_high 49152
+  uint16_t dac_code[2] = {dac_low, dac_high};
+
+  int32_t adc_code;
+  uint8_t adc_channel;
+  quikeval_SPI_connect();                                   //! Connect SPI to QuikEval connector
+
+  if (LTC2422_EOC_timeout(LTC2422_CS, MISO_TIMEOUT))        // Check for EOC
+    return(1);
+  LTC2422_adc_read(LTC2422_CS, &adc_channel, &adc_code);    //! Take one ADC reading. Throw away the data, but check the channel.
+  //! If the data was from channel 1, take another reading so that the next reading will be channel 0.
+  if (adc_channel == 1)
+  {
+    if (LTC2422_EOC_timeout(LTC2422_CS, MISO_TIMEOUT))      // Check for EOC
+      return(1);
+    LTC2422_adc_read(LTC2422_CS, &adc_channel, &adc_code);  // IF we just read channel 1 (DAC A),
+    // a conversion on channel B has just started. We want the FIRST reading in the table to be DAC A, so flush
+    // this conversion, starting another conversion on DAC A. The Autozero phase takes 4/60 of a second (66.7ms) so there
+    // is some time to print the header and set the DAC outputs.
+  }
+  Serial.println(F("Code, DAC A,DAC B"));
+
+  float adc_voltage;
+  uint16_t i;
+  //! For loop steps one voltage step at a time.
+  while(1) //Do forever
+  {
+    quikeval_I2C_connect();                                 //! Connects I2C port to the QuikEval connector
+    ++i;
+    //! Write DAC code to both channels.
+    ack |= LTC2607_write(LTC2607_I2C_GLOBAL_ADDRESS, LTC2607_WRITE_COMMAND, LTC2607_DAC_A, dac_code[i%2]);
+    ack |= LTC2607_write(LTC2607_I2C_GLOBAL_ADDRESS, LTC2607_WRITE_COMMAND, LTC2607_DAC_B, dac_code[(i+1)%2]);
+    ack |= LTC2607_write(LTC2607_I2C_GLOBAL_ADDRESS, LTC2607_UPDATE_COMMAND, LTC2607_ALL_DACS, 0);
+
+
+    quikeval_SPI_connect();                                 //! Connect SPI to QuikEval connector
+    if (LTC2422_EOC_timeout(LTC2422_CS, MISO_TIMEOUT))      // Check for EOC
+      return(1);
+    //! Read ADC channel 0 (DAC A) voltage and print it.
+    LTC2422_adc_read(LTC2422_CS, &adc_channel, &adc_code);
+
+    Serial.print(dac_code[0]);
+    Serial.print(F(","));
+    adc_voltage = LTC2422_code_to_voltage(adc_code, LTC2422_lsb);
+    Serial.print(adc_voltage, 6);
+    Serial.print(F(","));
+
+    delay(170); // Allow conversion to complete so we don't need to poll
+
+    //! If they get out of sync, print "Out of sync!". This only happens if something bad occurs.
+    if (adc_channel == 1)
+    {
+      Serial.println(F("Out of sync!!"));
+    }
+  }
+  quikeval_I2C_connect();
+  ack |= LTC2607_write(LTC2607_I2C_GLOBAL_ADDRESS, LTC2607_WRITE_UPDATE_COMMAND, LTC2607_ALL_DACS, 0x0000); //Set output to zero
+  Serial.println();
+  Serial.println(F("Exiting comms exerciser"));
+  return(ack);
+}
+
+
